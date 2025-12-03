@@ -1,5 +1,5 @@
 # smc/displacement.py
-# Deteksi displacement (candle impuls kuat) setelah sweep.
+# Deteksi displacement (candle impuls kuat) setelah sweep + minor Break of Structure.
 
 from typing import List, Optional, Dict
 from binance.ohlc_buffer import Candle
@@ -8,58 +8,95 @@ from binance.ohlc_buffer import Candle
 def detect_displacement(
     candles: List[Candle],
     sweep_index: int,
+    side: str,
     look_ahead: int = 2,
     body_factor: float = 1.8,
-) -> Dict[str, Optional[int]]:
+) -> Dict[str, Optional[object]]:
     """
     Deteksi candle impuls (displacement) setelah sweep_index.
 
-    - Bandingkan body candle kandidat dengan rata-rata body beberapa candle sebelumnya.
-    - arah harus searah dengan bias (naik untuk long, turun untuk short)
-    (arah final akan diputuskan di analyzer, di sini hanya cek 'besar' dan 'tegas').
+    Syarat:
+    - body besar dibanding rata-rata body beberapa candle sebelumnya
+    - body dominan terhadap range candle (wick tidak mendominasi)
+    - arah body sesuai side (long: bullish, short: bearish)
+    - candle mematahkan struktur kecil sebelum sweep (minor BOS)
 
     Return:
     {
-        "index": int | None,   # index candle displacement
+        "index": int | None,     # index candle displacement
+        "bos_ok": bool           # apakah terjadi minor BOS
     }
     """
     n = len(candles)
     if n < 10 or sweep_index is None or sweep_index < 3:
-        return {"index": None}
+        return {"index": None, "bos_ok": False}
 
     # hitung rata-rata body 5 candle sebelum sweep
-    prev_range = range(max(0, sweep_index - 5), sweep_index)
+    prev_start = max(0, sweep_index - 5)
+    prev_range = range(prev_start, sweep_index)
     prev_bodies = [
         abs(candles[i]["close"] - candles[i]["open"]) for i in prev_range
     ]
     if not prev_bodies:
-        return {"index": None}
+        return {"index": None, "bos_ok": False}
 
     avg_body = sum(prev_bodies) / len(prev_bodies)
     if avg_body <= 0:
-        return {"index": None}
+        return {"index": None, "bos_ok": False}
+
+    # minor struktur sebelum sweep:
+    # - untuk long: high tertinggi sebelum sweep
+    # - untuk short: low terendah sebelum sweep
+    struct_start = max(0, sweep_index - 6)
+    struct_segment = candles[struct_start:sweep_index + 1]
+    if not struct_segment:
+        return {"index": None, "bos_ok": False}
+
+    pre_high = max(c["high"] for c in struct_segment)
+    pre_low = min(c["low"] for c in struct_segment)
+
+    best_idx: Optional[int] = None
+    best_body = 0.0
+    bos_ok = False
 
     # cari candle impuls di 1-2 candle setelah sweep
     start = sweep_index + 1
     end = min(n, sweep_index + 1 + look_ahead)
 
-    best_idx: Optional[int] = None
-    best_body = 0.0
-
     for i in range(start, end):
         c = candles[i]
-        body = abs(c["close"] - c["open"])
-        total_range = c["high"] - c["low"]
+        open_ = c["open"]
+        close = c["close"]
+        high = c["high"]
+        low = c["low"]
+
+        body = abs(close - open_)
+        total_range = high - low
         if total_range <= 0:
             continue
 
-        # body harus dominan di candle tsb
+        # arah body harus sesuai side
+        if side == "long" and not (close > open_):
+            continue
+        if side == "short" and not (close < open_):
+            continue
+
         body_ratio = body / total_range
 
         # syarat: body cukup besar vs histori, dan dominan di range candle
-        if body >= body_factor * avg_body and body_ratio >= 0.55:
-            if body > best_body:
-                best_body = body
-                best_idx = i
+        if body < body_factor * avg_body or body_ratio < 0.55:
+            continue
 
-    return {"index": best_idx}
+        # minor BOS:
+        if side == "long":
+            # high atau close menembus high sebelum sweep
+            bos_cond = high > pre_high or close > pre_high
+        else:
+            bos_cond = low < pre_low or close < pre_low
+
+        if body > best_body:
+            best_body = body
+            best_idx = i
+            bos_ok = bool(bos_cond)
+
+    return {"index": best_idx, "bos_ok": bos_ok}
