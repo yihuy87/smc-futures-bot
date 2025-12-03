@@ -1,7 +1,7 @@
 # smc/rr_leverage.py
 # Bangun level Entry/SL/TP dan rekomendasi leverage berdasarkan jarak SL (SL%).
 
-from typing import Dict
+from typing import Dict, Tuple
 
 from binance.ohlc_buffer import Candle
 
@@ -39,10 +39,9 @@ def build_levels_and_leverage(
         raw_entry = 0.5 * (fvg_low + fvg_high)
         entry = min(raw_entry, last_close)
 
-        # SL di bawah low sweep, sedikit buffer
+        # SL di bawah low sweep, sedikit buffer adaptif
         sweep_low = candles_5m[sweep_index]["low"]
-        # buffer kecil ~ 0.15% dari harga sweep (adaptif)
-        buffer = sweep_low * 0.0015
+        buffer = max(sweep_low * 0.0015, abs(entry) * 0.0005)
         sl = sweep_low - buffer
 
         risk = entry - sl
@@ -52,7 +51,7 @@ def build_levels_and_leverage(
         entry = max(raw_entry, last_close)
 
         sweep_high = candles_5m[sweep_index]["high"]
-        buffer = sweep_high * 0.0015
+        buffer = max(sweep_high * 0.0015, abs(entry) * 0.0005)
         sl = sweep_high + buffer
 
         risk = sl - entry
@@ -86,7 +85,7 @@ def build_levels_and_leverage(
     }
 
 
-def recommend_leverage_range(sl_pct: float) -> tuple[float, float]:
+def recommend_leverage_range(sl_pct: float) -> Tuple[float, float]:
     """
     Rekomendasi leverage rentang berdasarkan SL% (risk per posisi jika 1x).
     Ini bukan perintah, hanya saran aman.
@@ -94,7 +93,6 @@ def recommend_leverage_range(sl_pct: float) -> tuple[float, float]:
     if sl_pct <= 0:
         return 5.0, 10.0
 
-    # Semakin kecil SL%, semakin besar leverage yang masih masuk akal.
     if sl_pct <= 0.25:
         return 25.0, 40.0
     elif sl_pct <= 0.50:
