@@ -1,5 +1,5 @@
 # smc/liquidity.py
-# Deteksi swing high/low dan zona liquidity sederhana (equal highs / equal lows).
+# Deteksi swing high/low dan zona liquidity (equal highs / equal lows) + sweep berkualitas.
 
 from typing import List, Dict, Tuple, Optional
 from binance.ohlc_buffer import Candle
@@ -66,12 +66,8 @@ def _cluster_levels(values: List[Tuple[int, float]], tolerance_pct: float) -> Li
     current_cluster: List[Tuple[int, float]] = [values[0]]
 
     for idx, price in values[1:]:
-        # bandingkan dengan harga rata-rata cluster sementara
         avg = sum(p for _, p in current_cluster) / len(current_cluster)
-        if avg == 0:
-            rel_diff = 0.0
-        else:
-            rel_diff = abs(price - avg) / avg
+        rel_diff = abs(price - avg) / avg if avg != 0 else 0.0
 
         if rel_diff <= tolerance_pct:
             current_cluster.append((idx, price))
@@ -123,7 +119,6 @@ def detect_liquidity_zones(
     if len(highs) >= 2:
         highs_sorted = sorted(highs, key=lambda x: x[1])
         high_clusters = _cluster_levels(highs_sorted, tolerance_pct)
-        # ambil cluster dengan rata-rata harga tertinggi (liquidity atas)
         if high_clusters:
             best_cluster = max(
                 high_clusters,
@@ -135,7 +130,6 @@ def detect_liquidity_zones(
     if len(lows) >= 2:
         lows_sorted = sorted(lows, key=lambda x: x[1])
         low_clusters = _cluster_levels(lows_sorted, tolerance_pct)
-        # ambil cluster dengan rata-rata harga terendah (liquidity bawah)
         if low_clusters:
             best_cluster = min(
                 low_clusters,
@@ -157,51 +151,114 @@ def detect_sweep(
 ) -> Dict[str, Optional[object]]:
     """
     Deteksi sweep terhadap liquidity atas atau bawah pada beberapa candle terakhir.
+    Sekaligus menilai kualitas sweep (bukan wick kecil biasa).
 
     Return:
     {
         "side": "long" | "short" | None,
         "index": int | None,
-        "liquidity_level": float | None
+        "liquidity_level": float | None,
+        "quality": bool
     }
     """
     n = len(candles)
-    if n < 5:
-        return {"side": None, "index": None, "liquidity_level": None}
+    if n < 8:
+        return {"side": None, "index": None, "liquidity_level": None, "quality": False}
 
     start = max(0, n - check_last_n)
-    sweep_side: Optional[str] = None
-    sweep_idx: Optional[int] = None
-    sweep_level: Optional[float] = None
 
-    # cek sweep low (untuk peluang LONG)
+    # helper: rata-rata range & wick kecil sebelum sweep
+    def avg_stats(before_index: int) -> Tuple[float, float, float]:
+        # hitung dari beberapa candle sebelum before_index
+        j_start = max(0, before_index - 5)
+        prev = candles[j_start:before_index]
+        if not prev:
+            return 0.0, 0.0, 0.0
+        ranges = [c["high"] - c["low"] for c in prev]
+        upper_wicks = [c["high"] - max(c["open"], c["close"]) for c in prev]
+        lower_wicks = [min(c["open"], c["close"]) - c["low"] for c in prev]
+        avg_range = sum(ranges) / len(ranges)
+        avg_up_wick = sum(upper_wicks) / len(upper_wicks)
+        avg_lo_wick = sum(lower_wicks) / len(lower_wicks)
+        return avg_range, avg_up_wick, avg_lo_wick
+
+    # cek dari candle terbaru ke lebih lama (prefer sweep paling baru)
+    # ----- Sweep bawah (LONG) -----
     if lower_liquidity is not None:
-        for i in range(start, n):
+        for i in range(n - 1, start - 1, -1):
             c = candles[i]
             low = c["low"]
-            close = c["close"]
-            # low tembus di bawah liquidity, close kembali di atas
-            if low < lower_liquidity and close > lower_liquidity:
-                sweep_side = "long"
-                sweep_idx = i
-                sweep_level = lower_liquidity
-                break
-
-    # cek sweep high (untuk peluang SHORT)
-    if sweep_side is None and upper_liquidity is not None:
-        for i in range(start, n):
-            c = candles[i]
             high = c["high"]
+            open_ = c["open"]
             close = c["close"]
-            # high tembus di atas liquidity, close kembali di bawah
-            if high > upper_liquidity and close < upper_liquidity:
-                sweep_side = "short"
-                sweep_idx = i
-                sweep_level = upper_liquidity
-                break
 
-    return {
-        "side": sweep_side,
-        "index": sweep_idx,
-        "liquidity_level": sweep_level,
-               }
+            if not (low < lower_liquidity < close):
+                continue
+
+            total_range = high - low
+            if total_range <= 0:
+                continue
+
+            body = abs(close - open_)
+            lower_wick = min(open_, close) - low
+
+            avg_range, _, avg_lo_wick = avg_stats(i)
+            if avg_range <= 0:
+                continue
+
+            # sweep berkualitas:
+            # - range > 1.2 × rata-rata
+            # - lower wick dominan
+            # - body tidak full (bukan candle full body)
+            range_ok = total_range > 1.2 * avg_range
+            wick_ratio = lower_wick / total_range if total_range > 0 else 0.0
+            wick_vs_avg = lower_wick > 1.2 * avg_lo_wick if avg_lo_wick > 0 else True
+            body_not_too_big = body <= 0.7 * total_range
+
+            quality = bool(range_ok and wick_ratio >= 0.35 and wick_vs_avg and body_not_too_big)
+
+            return {
+                "side": "long",
+                "index": i,
+                "liquidity_level": lower_liquidity,
+                "quality": quality,
+            }
+
+    # ----- Sweep atas (SHORT) -----
+    if upper_liquidity is not None:
+        for i in range(n - 1, start - 1, -1):
+            c = candles[i]
+            low = c["low"]
+            high = c["high"]
+            open_ = c["open"]
+            close = c["close"]
+
+            if not (high > upper_liquidity > close):
+                continue
+
+            total_range = high - low
+            if total_range <= 0:
+                continue
+
+            body = abs(close - open_)
+            upper_wick = high - max(open_, close)
+
+            avg_range, avg_up_wick, _ = avg_stats(i)
+            if avg_range <= 0:
+                continue
+
+            range_ok = total_range > 1.2 * avg_range
+            wick_ratio = upper_wick / total_range if total_range > 0 else 0.0
+            wick_vs_avg = upper_wick > 1.2 * avg_up_wick if avg_up_wick > 0 else True
+            body_not_too_big = body <= 0.7 * total_range
+
+            quality = bool(range_ok and wick_ratio >= 0.35 and wick_vs_avg and body_not_too_big)
+
+            return {
+                "side": "short",
+                "index": i,
+                "liquidity_level": upper_liquidity,
+                "quality": quality,
+            }
+
+    return {"side": None, "index": None, "liquidity_level": None, "quality": False}     
