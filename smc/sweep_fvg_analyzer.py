@@ -11,6 +11,7 @@ from smc.rr_leverage import build_levels_and_leverage
 from smc.tiers import evaluate_signal_quality
 from smc.htf_context import get_htf_context
 from core.smc_settings import smc_settings
+from core.signal_logger import log_signal   # logger sinyal
 
 
 def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
@@ -117,7 +118,7 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
     tier = q["tier"]
     score = q["score"]
 
-    # 8) Bangun pesan Telegram (format ringkas + info leverage + validitas)
+    # 8) Bangun pesan Telegram (format ringkas + leverage + validitas + risk calc)
     direction_label = "LONG" if side == "long" else "SHORT"
     emoji = "🟢" if side == "long" else "🔴"
 
@@ -132,6 +133,21 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
     approx_minutes = max_age_candles * 5
     valid_text = f"±{approx_minutes} menit" if approx_minutes > 0 else "singkat"
 
+    # Risk calculator mini
+    if sl_pct > 0:
+        # multiplier = (1% / SL%) = 100 / sl_pct
+        pos_mult = 100.0 / sl_pct
+        example_balance = 100.0
+        example_pos = pos_mult * example_balance
+        risk_calc = (
+            f"Risk Calc (contoh risiko 1%):\n"
+            f"• SL : {sl_pct_text} → nilai posisi ≈ (1% / SL%) × balance ≈ {pos_mult:.1f}× balance\n"
+            f"• Contoh balance 100 USDT → posisi ≈ {example_pos:.0f} USDT\n"
+            f"(sesuaikan dengan balance & leverage kamu)"
+        )
+    else:
+        risk_calc = "Risk Calc: SL% tidak valid (0), abaikan kalkulasi ini."
+
     text = (
         f"{emoji} SMC SIGNAL — {symbol.upper()} ({direction_label})\n"
         f"Entry : {entry:.4f}\n"
@@ -142,10 +158,11 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
         f"Model : Sweep → FVG Retest\n"
         f"Rekomendasi Leverage : {lev_text} (SL {sl_pct_text})\n"
         f"Validitas Entry : {valid_text}\n"
-        f"Tier : {tier} (Score {score})"
+        f"Tier : {tier} (Score {score})\n"
+        f"{risk_calc}"
     )
 
-    return {
+    result = {
         "symbol": symbol.upper(),
         "side": side,
         "entry": entry,
@@ -161,3 +178,8 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
         "htf_context": htf_ctx,
         "message": text,
     }
+
+    # 9) Log sinyal ke file
+    log_signal(result)
+
+    return result
