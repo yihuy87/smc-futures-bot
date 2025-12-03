@@ -9,18 +9,21 @@ from smc.displacement import detect_displacement
 from smc.fvg_zones import detect_fvg_around
 from smc.rr_leverage import build_levels_and_leverage
 from smc.tiers import evaluate_signal_quality
+from smc.htf_context import get_htf_context
+from core.smc_settings import smc_settings
 
 
 def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
     """
     Analisa SMC intraday untuk satu symbol menggunakan data 5m.
-    Fokus utama:
+    Flow:
     - cari liquidity (equal highs / equal lows)
-    - deteksi sweep (stop hunt)
-    - deteksi displacement (impuls)
-    - deteksi FVG
+    - deteksi sweep (stop hunt) berkualitas
+    - deteksi displacement + minor BOS
+    - deteksi FVG (quality checked)
     - bangun Entry/SL/TP dan rekomendasi leverage
-    - evaluasi kualitas → Tier → hanya kirim jika >= min_tier
+    - evaluasi kualitas (Tier) + konteks HTF (15m & 1h)
+    - hanya kirim jika >= min_tier
 
     Return None jika tidak ada setup yang layak.
     """
@@ -33,20 +36,21 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
     lower_liq = liq.get("lower_liquidity")
 
     if upper_liq is None and lower_liq is None:
-        # tidak ada liquidity berarti, skip
         return None
 
     # 2) Deteksi sweep di beberapa candle terakhir
     sweep = detect_sweep(candles_5m, upper_liq, lower_liq, check_last_n=4)
     side = sweep.get("side")
     sweep_idx = sweep.get("index")
+    sweep_quality = bool(sweep.get("quality"))
 
     if side not in ("long", "short") or sweep_idx is None:
         return None
 
-    # 3) Deteksi displacement setelah sweep
-    disp = detect_displacement(candles_5m, sweep_idx, look_ahead=2, body_factor=1.6)
+    # 3) Deteksi displacement setelah sweep (arah & minor BOS)
+    disp = detect_displacement(candles_5m, sweep_idx, side, look_ahead=2, body_factor=1.6)
     disp_idx = disp.get("index")
+    disp_bos = bool(disp.get("bos_ok"))
     if disp_idx is None:
         return None
 
@@ -58,6 +62,7 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
     fvg_dir = fvg.get("direction")
     fvg_low = fvg.get("low")
     fvg_high = fvg.get("high")
+    fvg_quality = bool(fvg.get("quality_ok"))
 
     if fvg_low is None or fvg_high is None or fvg_high <= fvg_low:
         return None
@@ -78,39 +83,54 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
     tp3 = levels["tp3"]
     sl_pct = levels["sl_pct"]
 
-    # Validasi R:R minimal
-    # RR TP2 harus >= 2.0 (sekitar) agar setup sehat.
+    # Validasi R:R minimal (TP2 ~ >= RR 1.8–2.0)
     risk = abs(entry - sl)
     if risk <= 0:
         return None
     rr_tp2 = abs(tp2 - entry) / risk
     good_rr = rr_tp2 >= 1.8
 
-    # 6) Evaluasi kualitas & Tier
+    # 6) Konteks HTF (15m & 1h)
+    htf_ctx = get_htf_context(symbol)
+    if side == "long":
+        htf_alignment = bool(htf_ctx.get("htf_ok_long", True))
+    else:
+        htf_alignment = bool(htf_ctx.get("htf_ok_short", True))
+
+    # 7) Evaluasi kualitas & Tier
     meta = {
         "has_liquidity": upper_liq is not None or lower_liq is not None,
         "has_sweep": True,
+        "sweep_quality": sweep_quality,
         "has_displacement": True,
+        "disp_bos": disp_bos,
         "has_fvg": True,
+        "fvg_quality": fvg_quality,
         "good_rr": good_rr,
         "sl_pct": sl_pct,
+        "htf_alignment": htf_alignment,
     }
     q = evaluate_signal_quality(meta)
     if not q["should_send"]:
         return None
 
     tier = q["tier"]
+    score = q["score"]
 
-    # 7) Bangun pesan Telegram (format ringkas sesuai kesepakatan)
+    # 8) Bangun pesan Telegram (format ringkas + info leverage + validitas)
     direction_label = "LONG" if side == "long" else "SHORT"
     emoji = "🟢" if side == "long" else "🔴"
 
     lev_min = levels["lev_min"]
     lev_max = levels["lev_max"]
 
-    # contoh: "15x–25x (SL 0.40%)"
     lev_text = f"{lev_min:.0f}x–{lev_max:.0f}x"
     sl_pct_text = f"{sl_pct:.2f}%"
+
+    # validitas sinyal (misal 6 candle 5m = 30 menit)
+    max_age_candles = smc_settings.max_entry_age_candles
+    approx_minutes = max_age_candles * 5
+    valid_text = f"±{approx_minutes} menit" if approx_minutes > 0 else "singkat"
 
     text = (
         f"{emoji} SMC SIGNAL — {symbol.upper()} ({direction_label})\n"
@@ -120,7 +140,9 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
         f"TP2   : {tp2:.4f}\n"
         f"TP3   : {tp3:.4f}\n"
         f"Model : Sweep → FVG Retest\n"
-        f"Rekomendasi Leverage : {lev_text} (SL {sl_pct_text})"
+        f"Rekomendasi Leverage : {lev_text} (SL {sl_pct_text})\n"
+        f"Validitas Entry : {valid_text}\n"
+        f"Tier : {tier} (Score {score})"
     )
 
     return {
@@ -135,6 +157,7 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
         "lev_min": lev_min,
         "lev_max": lev_max,
         "tier": tier,
-        "score": q["score"],
+        "score": score,
+        "htf_context": htf_ctx,
         "message": text,
-  }
+    }
