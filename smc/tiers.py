@@ -8,31 +8,55 @@ from core.bot_state import state
 
 def score_signal(meta: Dict) -> int:
     """
-    Skoring sederhana berdasarkan kualitas:
+    Skoring berdasarkan kualitas:
     - ada liquidity & sweep
-    - displacement kuat
-    - FVG jelas
+    - kualitas sweep (wick & range)
+    - displacement + minor BOS
+    - FVG ada & berkualitas
     - RR bagus
-    - SL% tidak terlalu besar
+    - SL% sehat
+    - align dengan konteks HTF
     """
+
     score = 0
 
-    if meta.get("has_liquidity"):
-        score += 15
-    if meta.get("has_sweep"):
-        score += 25
-    if meta.get("has_displacement"):
-        score += 25
-    if meta.get("has_fvg"):
-        score += 20
+    has_liq = bool(meta.get("has_liquidity"))
+    has_sweep = bool(meta.get("has_sweep"))
+    sweep_quality = bool(meta.get("sweep_quality"))
+    has_disp = bool(meta.get("has_displacement"))
+    disp_bos = bool(meta.get("disp_bos"))
+    has_fvg = bool(meta.get("has_fvg"))
+    fvg_quality = bool(meta.get("fvg_quality"))
+    good_rr = bool(meta.get("good_rr"))
+    htf_alignment = bool(meta.get("htf_alignment"))
 
-    # reward jika RR baik (TP2 ~ >= RR 2)
-    if meta.get("good_rr"):
+    sl_pct = float(meta.get("sl_pct", 0.0))
+
+    if has_liq:
+        score += 10
+    if has_sweep:
+        score += 20
+    if sweep_quality:
         score += 10
 
-    sl_pct = meta.get("sl_pct", 0.0)
-    if 0.1 <= sl_pct <= 0.8:
-        score += 15  # SL% sehat (kecil tapi tidak absurd)
+    if has_disp:
+        score += 20
+    if disp_bos:
+        score += 10
+
+    if has_fvg:
+        score += 15
+    if fvg_quality:
+        score += 10
+
+    if good_rr:
+        score += 10
+
+    if 0.10 <= sl_pct <= 0.80:
+        score += 10  # SL% sehat (kecil tapi tidak absurd)
+
+    if htf_alignment:
+        score += 15
 
     return int(min(score, 150))
 
@@ -73,10 +97,14 @@ def evaluate_signal_quality(meta: Dict) -> Dict:
     {
       "has_liquidity": bool,
       "has_sweep": bool,
+      "sweep_quality": bool,
       "has_displacement": bool,
+      "disp_bos": bool,
       "has_fvg": bool,
+      "fvg_quality": bool,
       "good_rr": bool,
       "sl_pct": float,
+      "htf_alignment": bool,
     }
     """
     score = score_signal(meta)
@@ -86,4 +114,4 @@ def evaluate_signal_quality(meta: Dict) -> Dict:
         "score": score,
         "tier": tier,
         "should_send": send,
-  }
+}
