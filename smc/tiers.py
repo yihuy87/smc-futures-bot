@@ -52,8 +52,9 @@ def score_signal(meta: Dict) -> int:
     if good_rr:
         score += 10
 
-    if 0.10 <= sl_pct <= 0.80:
-        score += 10  # SL% sehat (kecil tapi tidak absurd)
+    # SL% sehat (tidak terlalu kecil/absurd, tidak terlalu besar)
+    if 0.15 <= sl_pct <= 0.80:
+        score += 10
 
     if htf_alignment:
         score += 15
@@ -109,9 +110,34 @@ def evaluate_signal_quality(meta: Dict) -> Dict:
     """
     score = score_signal(meta)
     tier = tier_from_score(score)
-    send = should_send_tier(tier)
+
+    # Hard filter kualitas supaya kasus "hit entry → langsung SL" berkurang
+    sweep_quality = bool(meta.get("sweep_quality"))
+    disp_bos = bool(meta.get("disp_bos"))
+    fvg_quality = bool(meta.get("fvg_quality"))
+    good_rr = bool(meta.get("good_rr"))
+    htf_alignment = bool(meta.get("htf_alignment"))
+    sl_pct = float(meta.get("sl_pct", 0.0))
+
+    hard_ok = True
+
+    if not sweep_quality:
+        hard_ok = False
+    if not disp_bos:
+        hard_ok = False
+    if not fvg_quality:
+        hard_ok = False
+    if not good_rr:
+        hard_ok = False
+    if not htf_alignment:
+        hard_ok = False
+    if not (0.15 <= sl_pct <= 1.0):
+        hard_ok = False
+
+    send = should_send_tier(tier) and hard_ok
+
     return {
         "score": score,
         "tier": tier,
         "should_send": send,
-}
+    }
