@@ -150,11 +150,11 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
 
     text = (
         f"{emoji} SMC SIGNAL — {symbol.upper()} ({direction_label})\n"
-        f"Entry : {entry:.4f}\n"
-        f"SL    : {sl:.4f}\n"
-        f"TP1   : {tp1:.4f}\n"
-        f"TP2   : {tp2:.4f}\n"
-        f"TP3   : {tp3:.4f}\n"
+        f"Entry : `{entry:.6f}`\n"
+        f"SL    : `{sl:.6f}`\n"
+        f"TP1   : `{tp1:.6f}`\n"
+        f"TP2   : `{tp2:.6f}`\n"
+        f"TP3   : `{tp3:.6f}`\n"
         f"Model : Sweep → FVG Retest\n"
         f"Rekomendasi Leverage : {lev_text} (SL {sl_pct_text})\n"
         f"Validitas Entry : {valid_text}\n"
