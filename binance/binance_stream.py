@@ -6,6 +6,7 @@
 # - Simpan candle dalam deque dengan panjang maksimum (hemat memori)
 # - Refresh daftar pair berkala berdasarkan volume
 # - Reconnect WebSocket otomatis jika putus
+# - PRELOAD history 5m via REST supaya tidak perlu menunggu 2 jam
 # - TIDAK mengubah logika strategi SMC (hanya cara data di-stream & di-manage)
 
 import asyncio
@@ -15,8 +16,9 @@ from collections import deque
 from typing import Dict, Deque
 
 import websockets
+import requests  # tambahan untuk REST preload
 
-from config import BINANCE_STREAM_URL, REFRESH_PAIR_INTERVAL_HOURS
+from config import BINANCE_STREAM_URL, BINANCE_REST_URL, REFRESH_PAIR_INTERVAL_HOURS
 from binance.binance_pairs import get_usdt_pairs
 from core.bot_state import (
     state,
@@ -29,8 +31,6 @@ from core.smc_settings import smc_settings
 from smc.sweep_fvg_analyzer import analyze_symbol_smc
 from telegram.telegram_broadcast import broadcast_signal
 
-
-# Tipe candle ringan untuk 5m
 from typing import TypedDict
 
 
@@ -48,17 +48,63 @@ class Candle(TypedDict):
 MAX_5M_CANDLES = 120
 
 
+def preload_5m_history(symbols: list[str], candles_5m: Dict[str, Deque[Candle]], limit: int = 60) -> None:
+    """
+    PRELOAD data candlestick 5m via REST untuk setiap symbol.
+    Tujuan: buffer langsung terisi 50–60 candle, sehingga
+    bot tidak perlu menunggu 2 jam setelah restart.
+    """
+    print(f"Mulai preload history 5m untuk {len(symbols)} symbol (limit={limit})...")
+    for sym in symbols:
+        sym_upper = sym.upper()
+        try:
+            url = f"{BINANCE_REST_URL}/fapi/v1/klines"
+            params = {"symbol": sym_upper, "interval": "5m", "limit": limit}
+            r = requests.get(url, params=params, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+
+            if not data:
+                if state.debug:
+                    print(f"[PRELOAD] {sym_upper} tidak ada data klines.")
+                continue
+
+            buf = deque(maxlen=MAX_5M_CANDLES)
+            for row in data:
+                try:
+                    candle: Candle = {
+                        "open_time": int(row[0]),
+                        "open": float(row[1]),
+                        "high": float(row[2]),
+                        "low": float(row[3]),
+                        "close": float(row[4]),
+                        "volume": float(row[5]),
+                        "close_time": int(row[6]),
+                    }
+                except (ValueError, TypeError, IndexError):
+                    continue
+                buf.append(candle)
+
+            candles_5m[sym_upper] = buf
+            if state.debug:
+                print(f"[PRELOAD] {sym_upper} → {len(buf)} candle 5m dimuat.")
+        except Exception as e:
+            print(f"[PRELOAD] Error preload {sym_upper}:", e)
+    print("Preload history 5m selesai.\n")
+
+
 async def run_smc_bot():
     """
     Main loop SMC Futures bot:
     - Load subscribers/VIP/state
     - Ambil daftar pair USDT perpetual (filter volume)
+    - PRELOAD history 5m via REST (supaya tidak perlu menunggu 2 jam)
     - Hubungkan WebSocket multi-stream kline_5m
     - Build candle 5m per symbol di memori (deque terbatas)
     - Setiap candle close → run SMC analyzer → kirim sinyal kalau valid
     """
 
-    # Load state persistent (sama seperti bot lama, TIDAK mengubah akurasi)
+    # Load state persistent
     state.subscribers = load_subscribers()
     state.vip_users = load_vip_users()
     state.daily_date = time.strftime("%Y-%m-%d")
@@ -89,13 +135,15 @@ async def run_smc_bot():
                 last_pairs_refresh = now
                 state.force_pairs_refresh = False
 
-                # reset buffer hanya untuk symbol yang tidak lagi dipakai
                 current_set = set(s.upper() for s in symbols)
-                candles_5m = {
-                    sym: buf for sym, buf in candles_5m.items() if sym in current_set
-                }
+                # buang buffer symbol yang sudah tidak discan
+                candles_5m = {sym: buf for sym, buf in candles_5m.items() if sym in current_set}
 
                 print(f"Scan {len(symbols)} pair:", ", ".join(s.upper() for s in symbols))
+
+                if symbols:
+                    # PRELOAD history 5m untuk symbol yang baru di-scan
+                    preload_5m_history(symbols, candles_5m, limit=60)
 
             if not symbols:
                 print("Tidak ada symbol untuk discan. Tidur sebentar...")
@@ -129,7 +177,6 @@ async def run_smc_bot():
                     try:
                         msg = await asyncio.wait_for(ws.recv(), timeout=60)
                     except asyncio.TimeoutError:
-                        # Keep connection alive – kirim ping otomatis (handled by websockets)
                         if state.debug:
                             print("Timeout menunggu data WebSocket, lanjut...")
                         continue
@@ -151,11 +198,11 @@ async def run_smc_bot():
                     if not symbol:
                         continue
 
-                    # update buffer candle hanya ketika candle 5m close
+                    # Hanya proses saat candle 5m close
                     if not is_closed:
                         continue
 
-                    # Bangun candle 5m (ringan)
+                    # Bangun candle 5m
                     try:
                         candle: Candle = {
                             "open_time": int(kline["t"]),
@@ -200,10 +247,8 @@ async def run_smc_bot():
                                 )
                             continue
 
-                    # ANALISA SMC — TIDAK DIUBAH (hanya diberi data 5m terakhir)
-                    # Untuk efisiensi: cukup kirim ~80 candle terakhir (lebih dari cukup untuk lookback=40)
+                    # ANALISA SMC — data: ~80 candle terakhir 5m
                     recent_candles = list(buf)[-80:]
-
                     result = analyze_symbol_smc(symbol, recent_candles)
                     if not result:
                         continue
