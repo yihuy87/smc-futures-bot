@@ -142,7 +142,6 @@ def detect_liquidity_zones(
         "lower_liquidity": float(lower_liquidity) if lower_liquidity is not None else None,
     }
 
-
 def detect_sweep(
     candles: List[Candle],
     upper_liquidity: Optional[float],
@@ -192,6 +191,7 @@ def detect_sweep(
             open_ = c["open"]
             close = c["close"]
 
+            # low menembus level liquidity, close kembali di atas level
             if not (low < lower_liquidity < close):
                 continue
 
@@ -207,15 +207,15 @@ def detect_sweep(
                 continue
 
             # sweep berkualitas:
-            # - range > 1.2 × rata-rata
-            # - lower wick dominan
+            # - range jauh > rata-rata
+            # - lower wick dominan dan lebih besar dari wick sebelumnya
             # - body tidak full (bukan candle full body)
-            range_ok = total_range > 1.2 * avg_range
+            range_ok = total_range > 1.5 * avg_range
             wick_ratio = lower_wick / total_range if total_range > 0 else 0.0
-            wick_vs_avg = lower_wick > 1.2 * avg_lo_wick if avg_lo_wick > 0 else True
+            wick_vs_avg = lower_wick > 1.5 * avg_lo_wick if avg_lo_wick > 0 else True
             body_not_too_big = body <= 0.7 * total_range
 
-            quality = bool(range_ok and wick_ratio >= 0.35 and wick_vs_avg and body_not_too_big)
+            quality = bool(range_ok and wick_ratio >= 0.45 and wick_vs_avg and body_not_too_big)
 
             return {
                 "side": "long",
@@ -247,12 +247,12 @@ def detect_sweep(
             if avg_range <= 0:
                 continue
 
-            range_ok = total_range > 1.2 * avg_range
+            range_ok = total_range > 1.5 * avg_range
             wick_ratio = upper_wick / total_range if total_range > 0 else 0.0
-            wick_vs_avg = upper_wick > 1.2 * avg_up_wick if avg_up_wick > 0 else True
+            wick_vs_avg = upper_wick > 1.5 * avg_up_wick if avg_up_wick > 0 else True
             body_not_too_big = body <= 0.7 * total_range
 
-            quality = bool(range_ok and wick_ratio >= 0.35 and wick_vs_avg and body_not_too_big)
+            quality = bool(range_ok and wick_ratio >= 0.45 and wick_vs_avg and body_not_too_big)
 
             return {
                 "side": "short",
@@ -261,4 +261,4 @@ def detect_sweep(
                 "quality": quality,
             }
 
-    return {"side": None, "index": None, "liquidity_level": None, "quality": False}     
+    return {"side": None, "index": None, "liquidity_level": None, "quality": False}
