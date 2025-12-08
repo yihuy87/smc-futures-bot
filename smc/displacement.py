@@ -10,7 +10,7 @@ def detect_displacement(
     sweep_index: int,
     side: str,
     look_ahead: int = 2,
-    body_factor: float = 1.8,
+    body_factor: float = 2.0,
 ) -> Dict[str, Optional[object]]:
     """
     Deteksi candle impuls (displacement) setelah sweep_index.
@@ -84,7 +84,7 @@ def detect_displacement(
         body_ratio = body / total_range
 
         # syarat: body cukup besar vs histori, dan dominan di range candle
-        if body < body_factor * avg_body or body_ratio < 0.55:
+        if body < body_factor * avg_body or body_ratio < 0.60:
             continue
 
         # minor BOS:
