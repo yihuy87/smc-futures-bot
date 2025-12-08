@@ -49,7 +49,8 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
         return None
 
     # 3) Deteksi displacement setelah sweep (arah & minor BOS)
-    disp = detect_displacement(candles_5m, sweep_idx, side, look_ahead=2, body_factor=1.6)
+    # Perketat body_factor agar hanya impuls kuat yang lolos
+    disp = detect_displacement(candles_5m, sweep_idx, side, look_ahead=2, body_factor=2.0)
     disp_idx = disp.get("index")
     disp_bos = bool(disp.get("bos_ok"))
     if disp_idx is None:
@@ -133,17 +134,18 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
     approx_minutes = max_age_candles * 5
     valid_text = f"±{approx_minutes} menit" if approx_minutes > 0 else "singkat"
 
-    # Risk calculator mini
+    # Risk calculator mini (DIPERBAIKI: multiplier = 1 / SL%, bukan 100 / SL%)
     if sl_pct > 0:
-        # multiplier = (1% / SL%) = 100 / sl_pct
-        pos_mult = 100.0 / sl_pct
+        # SL% dalam persen. Untuk risk 1% per trade:
+        # pos_mult = (1% / SL%) = 1 / sl_pct
+        pos_mult = 1.0 / sl_pct
         example_balance = 100.0
         example_pos = pos_mult * example_balance
         risk_calc = (
             f"Risk Calc (contoh risiko 1%):\n"
-            f"• SL : {sl_pct_text} → nilai posisi ≈ (1% / SL%) × balance ≈ {pos_mult:.1f}× balance\n"
-            f"• Contoh balance 100 USDT → posisi ≈ {example_pos:.0f} USDT\n"
-            f"(sesuaikan dengan balance & leverage kamu)"
+            f"• SL : {sl_pct_text} → nilai posisi ≈ (1% / SL%) × balance ≈ {pos_mult:.2f}× balance\n"
+            f"• Contoh balance 100 USDT → posisi ≈ {example_pos:.2f} USDT\n"
+            f"(sesuaikan dengan balance & leverage kamu, jangan berlebihan)"
         )
     else:
         risk_calc = "Risk Calc: SL% tidak valid (0), abaikan kalkulasi ini."
