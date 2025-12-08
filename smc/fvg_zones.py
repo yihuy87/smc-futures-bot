@@ -4,13 +4,13 @@
 from typing import List, Optional, Dict
 from binance.ohlc_buffer import Candle
 
-
 def detect_fvg_around(
     candles: List[Candle],
     center_index: int,
     window: int = 3,
     max_width_pct: float = 0.008,
     max_dist_pct: float = 0.006,
+    min_width_pct: float = 0.0008,  # ~0.08% minimum
 ) -> Dict[str, Optional[object]]:
     """
     Deteksi FVG di sekitar candle 'center_index'.
@@ -21,16 +21,8 @@ def detect_fvg_around(
 
     Selain deteksi, juga menilai kualitas:
     - lebar FVG tidak terlalu besar
+    - lebar FVG tidak terlalu kecil (bukan noise mikro)
     - jarak mid FVG ke harga terakhir tidak terlalu jauh
-
-    Return:
-    {
-        "has_fvg": bool,
-        "low": float | None,
-        "high": float | None,
-        "direction": "bullish" | "bearish" | None,
-        "quality_ok": bool
-    }
     """
     n = len(candles)
     if n < 3 or center_index is None:
@@ -105,7 +97,6 @@ def detect_fvg_around(
             "quality_ok": False,
         }
 
-    # penilaian kualitas sederhana
     width = fvg_high - fvg_low
     if mid is None or mid <= 0:
         width_pct = 0.0
@@ -120,6 +111,10 @@ def detect_fvg_around(
     if width_pct > max_width_pct:
         quality_ok = False
 
+    # batas minimum lebar FVG (hindari noise mikro)
+    if width_pct < min_width_pct:
+        quality_ok = False
+
     # batas jarak ke harga sekarang (tidak terlalu jauh)
     if dist_pct > max_dist_pct:
         quality_ok = False
@@ -130,4 +125,4 @@ def detect_fvg_around(
         "high": float(fvg_high),
         "direction": chosen_dir,
         "quality_ok": quality_ok,
-                }
+        }
