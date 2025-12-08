@@ -52,8 +52,9 @@ def score_signal(meta: Dict) -> int:
     if good_rr:
         score += 10
 
-    # SL% sehat (tidak terlalu kecil/absurd, tidak terlalu besar)
-    if 0.15 <= sl_pct <= 0.80:
+    # SL% sehat (tidak terlalu kecil, tidak terlalu besar)
+    # Target sehat: 0.35%–1.5%
+    if 0.35 <= sl_pct <= 1.50:
         score += 10
 
     if htf_alignment:
@@ -131,7 +132,8 @@ def evaluate_signal_quality(meta: Dict) -> Dict:
         hard_ok = False
     if not htf_alignment:
         hard_ok = False
-    if not (0.15 <= sl_pct <= 1.0):
+    # SL terlalu kecil (<0.35%) atau terlalu besar (>1.5%) → buang
+    if not (0.35 <= sl_pct <= 1.50):
         hard_ok = False
 
     send = should_send_tier(tier) and hard_ok
@@ -140,4 +142,4 @@ def evaluate_signal_quality(meta: Dict) -> Dict:
         "score": score,
         "tier": tier,
         "should_send": send,
-    }
+        }
