@@ -4,6 +4,7 @@
 from typing import List, Optional, Dict
 from binance.ohlc_buffer import Candle
 
+
 def detect_fvg_around(
     candles: List[Candle],
     center_index: int,
@@ -20,9 +21,13 @@ def detect_fvg_around(
     - Bearish FVG: high[2] < low[0]
 
     Selain deteksi, juga menilai kualitas:
-    - lebar FVG tidak terlalu besar
-    - lebar FVG tidak terlalu kecil (bukan noise mikro)
-    - jarak mid FVG ke harga terakhir tidak terlalu jauh
+    - lebar FVG tidak terlalu besar (max_width_pct)
+    - lebar FVG tidak terlalu kecil (min_width_pct)
+    - jarak mid FVG ke harga terakhir tidak terlalu jauh (max_dist_pct)
+
+    CATATAN UNIT:
+    - *_pct parameters di sini adalah *fraction* dari price (mis. 0.008 = 0.8%),
+      bukan literal persen (0.8). Ini konsisten dengan penggunaan di SMC module.
     """
     n = len(candles)
     if n < 3 or center_index is None:
@@ -34,47 +39,73 @@ def detect_fvg_around(
             "quality_ok": False,
         }
 
-    start = max(0, center_index - window)
-    end = min(n - 2, center_index + window)
+    # validate center_index
+    if not (0 <= center_index < n):
+        return {
+            "has_fvg": False,
+            "low": None,
+            "high": None,
+            "direction": None,
+            "quality_ok": False,
+        }
 
-    best_bull_mid_dist = None
-    best_bear_mid_dist = None
+    # iterate i such that i+2 < n; make loop inclusive of upper window bound
+    start = max(0, center_index - window)
+    last_start = min(n - 3, center_index + window)  # ensure i+2 < n
+    if start > last_start:
+        return {
+            "has_fvg": False,
+            "low": None,
+            "high": None,
+            "direction": None,
+            "quality_ok": False,
+        }
+
+    best_bull_mid_dist: Optional[float] = None
+    best_bear_mid_dist: Optional[float] = None
 
     best_bull = (None, None)  # (fvg_low, fvg_high)
     best_bear = (None, None)
 
-    last_close = candles[-1]["close"]
+    last_close = float(candles[-1]["close"])
 
-    for i in range(start, end):
-        if i + 2 >= n:
-            break
+    for i in range(start, last_start + 1):
         c0 = candles[i]
         c2 = candles[i + 2]
 
+        # cast numeric fields to float for safety
+        c0_high = float(c0["high"])
+        c0_low = float(c0["low"])
+        c2_high = float(c2["high"])
+        c2_low = float(c2["low"])
+
         # Bullish FVG: c2.low > c0.high
-        if c2["low"] > c0["high"]:
-            fvg_low = c0["high"]
-            fvg_high = c2["low"]
-            mid = 0.5 * (fvg_low + fvg_high)
-            dist = abs(last_close - mid)
-            if best_bull_mid_dist is None or dist < best_bull_mid_dist:
-                best_bull_mid_dist = dist
-                best_bull = (fvg_low, fvg_high)
+        if c2_low > c0_high:
+            fvg_low = c0_high
+            fvg_high = c2_low
+            mid = 0.5 * (float(fvg_low) + float(fvg_high))
+            # avoid weird mid <= 0
+            if mid > 0:
+                dist = abs(last_close - mid)
+                if best_bull_mid_dist is None or dist < best_bull_mid_dist:
+                    best_bull_mid_dist = dist
+                    best_bull = (float(fvg_low), float(fvg_high))
 
         # Bearish FVG: c2.high < c0.low
-        if c2["high"] < c0["low"]:
-            fvg_high = c0["low"]
-            fvg_low = c2["high"]
-            mid = 0.5 * (fvg_low + fvg_high)
-            dist = abs(last_close - mid)
-            if best_bear_mid_dist is None or dist < best_bear_mid_dist:
-                best_bear_mid_dist = dist
-                best_bear = (fvg_low, fvg_high)
+        if c2_high < c0_low:
+            fvg_high = c0_low
+            fvg_low = c2_high
+            mid = 0.5 * (float(fvg_low) + float(fvg_high))
+            if mid > 0:
+                dist = abs(last_close - mid)
+                if best_bear_mid_dist is None or dist < best_bear_mid_dist:
+                    best_bear_mid_dist = dist
+                    best_bear = (float(fvg_low), float(fvg_high))
 
     chosen_dir: Optional[str] = None
     fvg_low: Optional[float] = None
     fvg_high: Optional[float] = None
-    mid = None
+    mid_val: Optional[float] = None
 
     if best_bull_mid_dist is not None or best_bear_mid_dist is not None:
         if best_bear_mid_dist is None or (
@@ -82,11 +113,12 @@ def detect_fvg_around(
         ):
             chosen_dir = "bullish"
             fvg_low, fvg_high = best_bull
-            mid = 0.5 * (fvg_low + fvg_high)
         else:
             chosen_dir = "bearish"
             fvg_low, fvg_high = best_bear
-            mid = 0.5 * (fvg_low + fvg_high)
+
+        if fvg_low is not None and fvg_high is not None:
+            mid_val = 0.5 * (float(fvg_low) + float(fvg_high))
 
     if chosen_dir is None or fvg_low is None or fvg_high is None or fvg_high <= fvg_low:
         return {
@@ -97,26 +129,26 @@ def detect_fvg_around(
             "quality_ok": False,
         }
 
-    width = fvg_high - fvg_low
-    if mid is None or mid <= 0:
+    width = float(fvg_high) - float(fvg_low)
+    if mid_val is None or mid_val <= 0:
         width_pct = 0.0
         dist_pct = 0.0
     else:
-        width_pct = width / mid
-        dist_pct = abs(last_close - mid) / mid
+        width_pct = width / mid_val
+        dist_pct = abs(last_close - mid_val) / mid_val
 
     quality_ok = True
 
     # batas lebar FVG (supaya tidak terlalu lebar)
-    if width_pct > max_width_pct:
+    if width_pct > float(max_width_pct):
         quality_ok = False
 
     # batas minimum lebar FVG (hindari noise mikro)
-    if width_pct < min_width_pct:
+    if width_pct < float(min_width_pct):
         quality_ok = False
 
     # batas jarak ke harga sekarang (tidak terlalu jauh)
-    if dist_pct > max_dist_pct:
+    if dist_pct > float(max_dist_pct):
         quality_ok = False
 
     return {
