@@ -1,9 +1,13 @@
 # smc/tiers.py
 # Evaluasi kualitas sinyal dan tentukan Tier (A+, A, B, NONE).
 
-from typing import Dict
+from typing import Dict, List
 
 from core.bot_state import state
+
+# Threshold constants (mudah di-tune)
+MIN_SL_PCT = 0.35
+MAX_SL_PCT = 1.50
 
 
 def score_signal(meta: Dict) -> int:
@@ -17,7 +21,6 @@ def score_signal(meta: Dict) -> int:
     - SL% sehat
     - align dengan konteks HTF
     """
-
     score = 0
 
     has_liq = bool(meta.get("has_liquidity"))
@@ -28,9 +31,12 @@ def score_signal(meta: Dict) -> int:
     has_fvg = bool(meta.get("has_fvg"))
     fvg_quality = bool(meta.get("fvg_quality"))
     good_rr = bool(meta.get("good_rr"))
-    htf_alignment = bool(meta.get("htf_alignment"))
+    htf_alignment = bool(meta.get("htf_alignment", True))  # default netral if missing
 
-    sl_pct = float(meta.get("sl_pct", 0.0))
+    try:
+        sl_pct = float(meta.get("sl_pct", 0.0))
+    except Exception:
+        sl_pct = 0.0
 
     if has_liq:
         score += 10
@@ -53,8 +59,7 @@ def score_signal(meta: Dict) -> int:
         score += 10
 
     # SL% sehat (tidak terlalu kecil, tidak terlalu besar)
-    # Target sehat: 0.35%–1.5%
-    if 0.35 <= sl_pct <= 1.50:
+    if MIN_SL_PCT <= sl_pct <= MAX_SL_PCT:
         score += 10
 
     if htf_alignment:
@@ -108,38 +113,57 @@ def evaluate_signal_quality(meta: Dict) -> Dict:
       "sl_pct": float,
       "htf_alignment": bool,
     }
+
+    Returns:
+      {
+        "score": int,
+        "tier": str,
+        "should_send": bool,
+        "reasons": List[str]   # optional: why not send
+      }
     """
     score = score_signal(meta)
     tier = tier_from_score(score)
 
     # Hard filter kualitas supaya kasus "hit entry → langsung SL" berkurang
+    reasons: List[str] = []
+
     sweep_quality = bool(meta.get("sweep_quality"))
-    disp_bos = bool(meta.get("disp_bos"))
-    fvg_quality = bool(meta.get("fvg_quality"))
-    good_rr = bool(meta.get("good_rr"))
-    htf_alignment = bool(meta.get("htf_alignment"))
-    sl_pct = float(meta.get("sl_pct", 0.0))
-
-    hard_ok = True
-
     if not sweep_quality:
-        hard_ok = False
-    if not disp_bos:
-        hard_ok = False
-    if not fvg_quality:
-        hard_ok = False
-    if not good_rr:
-        hard_ok = False
-    if not htf_alignment:
-        hard_ok = False
-    # SL terlalu kecil (<0.35%) atau terlalu besar (>1.5%) → buang
-    if not (0.35 <= sl_pct <= 1.50):
-        hard_ok = False
+        reasons.append("sweep_quality_false")
 
+    disp_bos = bool(meta.get("disp_bos"))
+    if not disp_bos:
+        reasons.append("disp_bos_false")
+
+    fvg_quality = bool(meta.get("fvg_quality"))
+    if not fvg_quality:
+        reasons.append("fvg_quality_false")
+
+    good_rr = bool(meta.get("good_rr"))
+    if not good_rr:
+        reasons.append("good_rr_false")
+
+    # treat missing HTF alignment as neutral (True) to avoid false reject when HTF unavailable
+    htf_alignment = meta.get("htf_alignment")
+    if htf_alignment is None:
+        htf_alignment = True
+    if not bool(htf_alignment):
+        reasons.append("htf_alignment_false")
+
+    try:
+        sl_pct = float(meta.get("sl_pct", 0.0))
+    except Exception:
+        sl_pct = 0.0
+    if not (MIN_SL_PCT <= sl_pct <= MAX_SL_PCT):
+        reasons.append("sl_pct_out_of_range")
+
+    hard_ok = len(reasons) == 0
     send = should_send_tier(tier) and hard_ok
 
     return {
         "score": score,
         "tier": tier,
         "should_send": send,
+        "reasons": reasons,
         }
