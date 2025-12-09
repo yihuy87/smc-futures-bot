@@ -7,8 +7,12 @@
 # - Entry tetap gunakan FVG, tetapi dengan pendekatan yang lebih aman
 # - Rekomendasi leverage jauh lebih konservatif
 # - LOGIKA Risk Calc di sweep_fvg_analyzer diperbaiki (1/sl_pct, bukan 100/sl_pct)
+#
+# Revisi ini menambahkan sanity guards (range checks, numeric safety) dan
+# memastikan sl_pct dihitung konsisten dalam *persen* (mis. 0.45 berarti 0.45%).
 
 from typing import Dict, Tuple, List
+import math
 
 from binance.ohlc_buffer import Candle
 
@@ -22,11 +26,11 @@ def _calc_atr(candles: List[Candle], period: int = 14) -> float:
     if n <= period + 1:
         return 0.0
 
-    trs = []
+    trs: List[float] = []
     for i in range(1, n):
-        high = candles[i]["high"]
-        low = candles[i]["low"]
-        prev_close = candles[i - 1]["close"]
+        high = float(candles[i]["high"])
+        low = float(candles[i]["low"])
+        prev_close = float(candles[i - 1]["close"])
         tr = max(
             high - low,
             abs(high - prev_close),
@@ -53,71 +57,68 @@ def build_levels_and_leverage(
     rr_tp3: float = 3.0,
 ) -> Dict:
     """
-    side: "long" atau "short"
-    fvg_low, fvg_high: level FVG dari deteksi sebelumnya.
+    Bangun entry/sl/tp dan rekomendasi leverage untuk SMC sweep+FVG retest.
 
-    Versi perbaikan:
-    - Entry masih menggunakan FVG, tapi tidak terlalu agresif (tidak terlalu dekat noise).
-    - SL diletakkan di balik sweep + buffer adaptif:
-      * 30% lebar FVG
-      * minimal 0.35% dari harga
-      * minimal 0.5×ATR (jika ATR tersedia)
-    - SL% dijaga di kisaran sehat (≈0.35%–1.5%) sehingga:
-      * tidak terlalu mudah tersentuh noise
-      * tetap memberi RR yang masuk akal
+    Return keys:
+      entry, sl, tp1, tp2, tp3, sl_pct (persen), lev_min, lev_max
+
+    Catatan unit:
+      - sl_pct dikembalikan dalam *persen* (mis. 0.45 => 0.45%).
     """
+    # --- basic guards ---
+    n = len(candles_5m)
+    if n == 0:
+        raise ValueError("candles_5m kosong")
+    if sweep_index is None or not (0 <= sweep_index < n):
+        raise IndexError(f"sweep_index out of range: {sweep_index}")
 
-    last_close = candles_5m[-1]["close"]
+    last_close = float(candles_5m[-1]["close"])
 
-    # Pastikan urutan low < high
-    f_low = min(fvg_low, fvg_high)
-    f_high = max(fvg_low, fvg_high)
+    # Pastikan urutan low < high untuk FVG
+    f_low = float(min(fvg_low, fvg_high))
+    f_high = float(max(fvg_low, fvg_high))
     f_range = max(f_high - f_low, 1e-9)
 
     # Entry: sedikit ke dalam FVG dari sisi yang sesuai dengan arah,
-    # tapi tidak memaksa di luar harga saat ini (anti FOMO).
+    # tetapi tidak di luar harga sekarang (anti-FOMO).
     edge_frac = 0.3  # 30% dari sisi FVG
 
     if side == "long":
-        # Retest dari sisi atas FVG, turun sedikit ke dalam
         raw_entry = f_high - edge_frac * f_range
-        entry = min(raw_entry, last_close)
+        entry = float(min(raw_entry, last_close))
     else:
-        # SHORT: retest dari sisi bawah FVG, naik sedikit ke dalam
         raw_entry = f_low + edge_frac * f_range
-        entry = max(raw_entry, last_close)
+        entry = float(max(raw_entry, last_close))
 
-    # ATR untuk skala buffer
-    atr = _calc_atr(candles_5m, period=14)
+    # Ensure entry not zero to avoid division issues
+    if entry == 0.0:
+        entry = last_close if last_close != 0.0 else 1e-9
+
+    # ATR for scale
+    atr = float(_calc_atr(candles_5m, period=14))
 
     # ===================== SL & RISK =====================
-    if side == "long":
-        sweep_low = candles_5m[sweep_index]["low"]
-        # buffer awal: 30% FVG range
-        base_buffer = 0.30 * f_range
-        # tambahkan constraint minimal berdasarkan ATR & persentase harga
-        min_price_buffer = abs(entry) * 0.0035  # ≈0.35% dari harga
-        if atr > 0:
-            min_price_buffer = max(min_price_buffer, 0.5 * atr)
+    # buffer logic: base from FVG + min price buffer based on percent & ATR
+    base_buffer = 0.30 * f_range
+    min_price_buffer_pct = 0.0035  # ≈0.35%
+    min_price_buffer = abs(entry) * min_price_buffer_pct
+    if atr > 0:
+        min_price_buffer = max(min_price_buffer, 0.5 * atr)
 
-        buffer = max(base_buffer, min_price_buffer)
-        sl = sweep_low - buffer
+    buffer = max(base_buffer, min_price_buffer)
+
+    if side == "long":
+        sweep_low = float(candles_5m[sweep_index]["low"])
+        sl = float(sweep_low - buffer)
         risk = entry - sl
     else:
-        sweep_high = candles_5m[sweep_index]["high"]
-        base_buffer = 0.30 * f_range
-        min_price_buffer = abs(entry) * 0.0035  # ≈0.35% dari harga
-        if atr > 0:
-            min_price_buffer = max(min_price_buffer, 0.5 * atr)
-
-        buffer = max(base_buffer, min_price_buffer)
-        sl = sweep_high + buffer
+        sweep_high = float(candles_5m[sweep_index]["high"])
+        sl = float(sweep_high + buffer)
         risk = sl - entry
 
-    # Fallback jika entah bagaimana risk <= 0
-    if risk <= 0:
-        # Minimum 0.35% dari harga sebagai backup
-        min_r = abs(entry) * 0.0035
+    # Fallback if risk not positive (extreme / degenerate cases)
+    if not (risk > 0 and math.isfinite(risk)):
+        min_r = abs(entry) * min_price_buffer_pct
         if side == "long":
             sl = entry - min_r
             risk = entry - sl
@@ -125,12 +126,17 @@ def build_levels_and_leverage(
             sl = entry + min_r
             risk = sl - entry
 
-    # Hitung SL% dan jaga di kisaran sehat (target 0.35–1.5%)
-    sl_pct = abs(risk / entry) * 100.0 if entry != 0 else 0.0
+    # final numeric safety
+    if risk <= 0:
+        # last-resort fallback
+        raise RuntimeError("Unable to compute positive risk for levels")
 
-    # Kalau masih terlalu kecil (<0.35%), lebarkan lagi SL sedikit
-    MIN_SL_PCT = 0.35
-    if sl_pct > 0 and sl_pct < MIN_SL_PCT:
+    # ===================== enforce minimal SL% floor (target healthy range) ====
+    sl_pct = abs(risk / entry) * 100.0  # percent
+
+    MIN_SL_PCT = 0.35  # minimum acceptable percent
+    if sl_pct < MIN_SL_PCT:
+        # widen risk to meet min SL%
         target_risk = abs(entry) * (MIN_SL_PCT / 100.0)
         if side == "long":
             sl = entry - target_risk
@@ -138,21 +144,42 @@ def build_levels_and_leverage(
         else:
             sl = entry + target_risk
             risk = sl - entry
-        sl_pct = abs(risk / entry) * 100.0 if entry != 0 else sl_pct
+        sl_pct = abs(risk / entry) * 100.0
+
+    # OPTIONAL: Cap SL% upper bound to avoid crazy wide SL (safety)
+    MAX_SL_PCT = 20.0  # unrealistic very large SLs are capped (project-specific)
+    if sl_pct > MAX_SL_PCT:
+        # bring sl closer proportionally
+        target_risk = abs(entry) * (MAX_SL_PCT / 100.0)
+        if side == "long":
+            sl = entry - target_risk
+            risk = entry - sl
+        else:
+            sl = entry + target_risk
+            risk = sl - entry
+        sl_pct = abs(risk / entry) * 100.0
 
     # ===================== TP (RR) =====================
     if side == "long":
-        tp1 = entry + rr_tp1 * risk
-        tp2 = entry + rr_tp2 * risk
-        tp3 = entry + rr_tp3 * risk
+        tp1 = entry + float(rr_tp1) * risk
+        tp2 = entry + float(rr_tp2) * risk
+        tp3 = entry + float(rr_tp3) * risk
     else:
-        tp1 = entry - rr_tp1 * risk
-        tp2 = entry - rr_tp2 * risk
-        tp3 = entry - rr_tp3 * risk
+        tp1 = entry - float(rr_tp1) * risk
+        tp2 = entry - float(rr_tp2) * risk
+        tp3 = entry - float(rr_tp3) * risk
 
-    # ===================== SL% & LEVERAGE =====================
-    sl_pct = abs(risk / entry) * 100.0 if entry != 0 else 0.0
+    # ===================== LEVERAGE recommendation =====================
+    # use sl_pct (percent) to recommend leverage
     lev_min, lev_max = recommend_leverage_range(sl_pct)
+
+    # ensure lev_min <= lev_max and are finite
+    lev_min = float(lev_min)
+    lev_max = float(lev_max)
+    if not (math.isfinite(lev_min) and math.isfinite(lev_max)):
+        lev_min, lev_max = 1.0, 1.0
+    if lev_min > lev_max:
+        lev_min, lev_max = lev_max, lev_min
 
     return {
         "entry": float(entry),
@@ -173,19 +200,19 @@ def recommend_leverage_range(sl_pct: float) -> Tuple[float, float]:
     - SL kecil → leverage boleh agak besar, tapi tidak ekstrem
     - SL besar → leverage diturunkan
     """
-    if sl_pct <= 0:
-        return 3.0, 5.0
+    try:
+        sp = float(sl_pct)
+    except Exception:
+        sp = 0.0
 
-    # Kira-kira:
-    # - <0.5% : 4–7x
-    # - 0.5–0.8% : 3–5x
-    # - 0.8–1.5% : 2–3x
-    # - >1.5% : 1–2x
-    if sl_pct <= 0.50:
+    if sp <= 0:
+        return 1.0, 2.0
+
+    if sp <= 0.50:
         return 4.0, 7.0
-    elif sl_pct <= 0.80:
+    elif sp <= 0.80:
         return 3.0, 5.0
-    elif sl_pct <= 1.50:
+    elif sp <= 1.50:
         return 2.0, 3.0
     else:
         return 1.0, 2.0
