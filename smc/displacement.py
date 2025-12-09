@@ -23,20 +23,27 @@ def detect_displacement(
 
     Return:
     {
-        "index": int | None,     # index candle displacement
-        "bos_ok": bool           # apakah terjadi minor BOS
+        "index": int | None,
+        "bos_ok": bool
     }
     """
+
     n = len(candles)
-    if n < 10 or sweep_index is None or sweep_index < 3:
+    if n < 10 or sweep_index is None:
         return {"index": None, "bos_ok": False}
 
-    # hitung rata-rata body 5 candle sebelum sweep
+    # --- Validasi sweep_index ---
+    if sweep_index < 2 or sweep_index >= n - 1:
+        return {"index": None, "bos_ok": False}
+
+    # --- Hitung rata-rata body sebelum sweep ---
     prev_start = max(0, sweep_index - 5)
-    prev_range = range(prev_start, sweep_index)
+    prev_segment = candles[prev_start:sweep_index]
+
     prev_bodies = [
-        abs(candles[i]["close"] - candles[i]["open"]) for i in prev_range
+        abs(c["close"] - c["open"]) for c in prev_segment
     ]
+
     if not prev_bodies:
         return {"index": None, "bos_ok": False}
 
@@ -44,11 +51,10 @@ def detect_displacement(
     if avg_body <= 0:
         return {"index": None, "bos_ok": False}
 
-    # minor struktur sebelum sweep:
-    # - untuk long: high tertinggi sebelum sweep
-    # - untuk short: low terendah sebelum sweep
+    # --- Struktur sebelum sweep ---
     struct_start = max(0, sweep_index - 6)
     struct_segment = candles[struct_start:sweep_index + 1]
+
     if not struct_segment:
         return {"index": None, "bos_ok": False}
 
@@ -59,23 +65,23 @@ def detect_displacement(
     best_body = 0.0
     bos_ok = False
 
-    # cari candle impuls di 1-2 candle setelah sweep
+    # --- Cari displacement candle di depan sweep (1–2 candle) ---
     start = sweep_index + 1
-    end = min(n, sweep_index + 1 + look_ahead)
+    end = min(n, sweep_index + 1 + max(1, look_ahead))
 
     for i in range(start, end):
         c = candles[i]
-        open_ = c["open"]
-        close = c["close"]
-        high = c["high"]
-        low = c["low"]
+        open_ = float(c["open"])
+        close = float(c["close"])
+        high = float(c["high"])
+        low = float(c["low"])
 
         body = abs(close - open_)
         total_range = high - low
         if total_range <= 0:
             continue
 
-        # arah body harus sesuai side
+        # Arah body harus selaras
         if side == "long" and not (close > open_):
             continue
         if side == "short" and not (close < open_):
@@ -83,16 +89,15 @@ def detect_displacement(
 
         body_ratio = body / total_range
 
-        # syarat: body cukup besar vs histori, dan dominan di range candle
+        # body harus dominan dan lebih besar dari histori
         if body < body_factor * avg_body or body_ratio < 0.60:
             continue
 
-        # minor BOS:
+        # --- Minor BOS lebih ketat: gunakan close, bukan wick ---
         if side == "long":
-            # high atau close menembus high sebelum sweep
-            bos_cond = high > pre_high or close > pre_high
+            bos_cond = close > pre_high
         else:
-            bos_cond = low < pre_low or close < pre_low
+            bos_cond = close < pre_low
 
         if body > best_body:
             best_body = body
