@@ -2,6 +2,7 @@
 # Analisa utama SMC: Liquidity Sweep → Displacement → FVG → Entry/SL/TP.
 
 from typing import List, Optional, Dict
+import math
 
 from binance.ohlc_buffer import Candle
 from smc.liquidity import detect_liquidity_zones, detect_sweep
@@ -27,6 +28,10 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
     - hanya kirim jika >= min_tier
 
     Return None jika tidak ada setup yang layak.
+
+    Catatan unit:
+    - sl_pct yang dikembalikan oleh build_levels_and_leverage diharapkan
+      dalam satuan *persen* (mis. 1.01 berarti 1.01%).
     """
     if len(candles_5m) < 30:
         return None
@@ -134,16 +139,21 @@ def analyze_symbol_smc(symbol: str, candles_5m: List[Candle]) -> Optional[Dict]:
     approx_minutes = max_age_candles * 5
     valid_text = f"±{approx_minutes} menit" if approx_minutes > 0 else "singkat"
 
-    # Risk calculator mini (DIPERBAIKI: multiplier = 1 / SL%, bukan 100 / SL%)
+    # Risk calculator mini (safeguarded)
     if sl_pct > 0:
-        # SL% dalam persen. Untuk risk 1% per trade:
-        # pos_mult = (1% / SL%) = 1 / sl_pct
-        pos_mult = 1.0 / sl_pct
+        # sl_pct is in percent (e.g. 1.01 => 1.01%)
+        sl_frac = sl_pct / 100.0
+        # Guard: jika sl_frac sangat kecil, hindari pembagian besar tak terbatas
+        if sl_frac <= 0 or not math.isfinite(sl_frac):
+            pos_mult = float("inf")
+        else:
+            pos_mult = 0.01 / sl_frac  # sama dengan 1.0 / sl_pct
         example_balance = 100.0
-        example_pos = pos_mult * example_balance
+        example_pos = pos_mult * example_balance if math.isfinite(pos_mult) else float("inf")
+        # tampilkan pos_mult 3 desimal agar pembaca paham skala
         risk_calc = (
             f"Risk Calc (contoh risiko 1%):\n"
-            f"• SL : {sl_pct_text} → nilai posisi ≈ (1% / SL%) × balance ≈ {pos_mult:.2f}× balance\n"
+            f"• SL : {sl_pct_text} → nilai posisi ≈ (1% / SL%) × balance ≈ {pos_mult:.3f}× balance\n"
             f"• Contoh balance 100 USDT → posisi ≈ {example_pos:.2f} USDT\n"
             f"(sesuaikan dengan balance & leverage kamu, jangan berlebihan)"
         )
